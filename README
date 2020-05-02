@@ -1,3 +1,4 @@
 HollowLoad
 
-HollowLoad is a small program which attempts to download a windows PE binary from an http URL, stash it in memory and execute it without the need to drop it on disk.
+HollowLoad is a small program which attempts to download a windows PE binary from a http URL, stash it in memory and execute it without the need to drop it on disk.
+Currently it only works with x86 binaries, however it will work with C# binaries as well as C/C++ if the hollowload.exe.config is within the same directory as the bianry.
